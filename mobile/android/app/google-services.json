@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "561905173639",
+    "project_id": "resqconnect-6f4bd",
+    "storage_bucket": "resqconnect-6f4bd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:561905173639:android:a666dad62355701de16422",
+        "android_client_info": {
+          "package_name": "com.resqconnect.resqconnect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBp0g09LMWvnLkNS0FpxnLC0RX5xo8YGoY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,127 @@
+name: FastAPI Backend CI/CD
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Disposable PostgreSQL + PostGIS (same major versions as local development:
+    # PostgreSQL 18, PostGIS 3.6). It exists only for this job and is destroyed with it.
+    services:
+      postgres:
+        image: postgis/postgis:18-3.6
+        env:
+          POSTGRES_USER: resqconnect_ci
+          # CI-only credential for a throwaway container; not a real secret.
+          POSTGRES_PASSWORD: ci-only-disposable-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U resqconnect_ci -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Explicit database settings: CI never reads a .env file or a developer database.
+    env:
+      ENVIRONMENT: development
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: resqconnect_ci
+      POSTGRES_PASSWORD: ci-only-disposable-password
+      POSTGRES_DB: resqconnect_test
+      TEST_POSTGRES_DB: resqconnect_test
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: resqconnect_ci
+      PGPASSWORD: ci-only-disposable-password
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        # The version the suite is verified with locally.
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: backend/requirements.txt
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Syntax analysis check
+      run: |
+        # Ensure files are syntactically valid and match standard structures
+        python -m py_compile app/main.py app/core/config.py
+
+    - name: Generate a per-run SECRET_KEY
+      run: |
+        # Settings requires a SECRET_KEY (>= 32 random characters) for Alembic; the test
+        # suite generates its own. Never a stored or real key.
+        key="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+        echo "::add-mask::${key}"
+        echo "SECRET_KEY=${key}" >> "$GITHUB_ENV"
+
+    - name: Create the test database
+      run: |
+        # template1 is clean in the postgis image; the migrations enable PostGIS themselves.
+        psql -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE resqconnect_test"
+
+    - name: Apply migrations
+      run: |
+        alembic upgrade head
+        current="$(alembic current | awk '{print $1}')"
+        head="$(alembic heads | awk '{print $1}')"
+        echo "Alembic current: ${current}; head: ${head}"
+        test -n "${head}" && test "${current}" = "${head}"
+
+    - name: Verify PostGIS and schema
+      run: |
+        psql -v ON_ERROR_STOP=1 -d resqconnect_test <<'SQL'
+        SELECT postgis_full_version();
+        SELECT ST_AsText(ST_SetSRID(ST_MakePoint(77.59, 12.97), 4326)) AS sample_point;
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM geometry_columns
+            WHERE f_table_name = 'incidents' AND f_geometry_column = 'location'
+              AND type = 'POINT' AND srid = 4326
+          ) THEN
+            RAISE EXCEPTION 'incidents.location is not a PostGIS POINT(4326) column';
+          END IF;
+          IF (SELECT count(*) FROM roles) = 0 THEN
+            RAISE EXCEPTION 'roles were not seeded by the migrations';
+          END IF;
+        END $$;
+        SELECT name FROM roles ORDER BY name;
+        SQL
+
+    - name: Run the backend test suite
+      run: |
+        python -m pytest -q -rs | tee pytest-output.txt
+        # The complete suite must run: fail if anything was skipped.
+        if grep -Eq '[0-9]+ skipped' pytest-output.txt; then
+          echo "::error::Backend tests were skipped in CI"
+          exit 1
+        fi

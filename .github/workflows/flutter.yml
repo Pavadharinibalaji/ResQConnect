@@ -1,0 +1,69 @@
+name: Flutter CI/CD
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/flutter.yml'
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/flutter.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Java Development Kit
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        # pubspec.lock requires Dart >= 3.11; this is the version the release build was verified with.
+        flutter-version: '3.47.5'
+        channel: 'stable'
+        cache: true
+
+    - name: Get packages
+      run: |
+        cd mobile
+        flutter pub get
+
+    - name: Analyze code syntax
+      run: |
+        cd mobile
+        flutter analyze
+
+    - name: Run client tests (default configuration, auth bypass off)
+      run: |
+        cd mobile
+        flutter test
+
+    - name: Run client tests with production configuration
+      run: |
+        cd mobile
+        flutter test --dart-define=APP_ENV=production
+
+    - name: Run client tests with the explicit development auth bypass
+      run: |
+        cd mobile
+        flutter test --dart-define=APP_ENV=development --dart-define=DEV_AUTH_BYPASS=true
+
+    # Validates that a production release build compiles. No secrets are used: release
+    # builds are still signed with the debug key (see docs/Deployment.md), and the
+    # artifact is neither uploaded nor published.
+    - name: Build production release APK
+      run: |
+        cd mobile
+        flutter build apk --release --dart-define=APP_ENV=production

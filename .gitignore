@@ -1,0 +1,75 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+*.flutter-plugins
+*.flutter-plugins-dependencies
+
+# Android
+.gradle/
+local.properties
+*.apk
+*.ap_
+*.dex
+*.class
+
+# iOS/macOS
+.sandbox/
+Runner.xcworkspace/
+xcuserdata/
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.pbxuser
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases
+*.db
+*.sqlite3
+
+# Environment Configurations & Secrets
+# Every real env file (.env, .env.development, .env.production, ...) is local-only;
+# .env.example is the committed placeholder template.
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+*.pem
+secrets.xml
+# Firebase Admin SDK service-account keys (provide at runtime, never commit)
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+service-account*.json
+
+# Logs (may contain request data, tokens or crash-time environment dumps)
+*.log
+logs/
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Docker
+.docker-volumes/

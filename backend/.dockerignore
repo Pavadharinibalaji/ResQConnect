@@ -1,0 +1,45 @@
+# Docker build context for the backend image (see Dockerfile: `COPY . .`).
+# The image needs: app/, requirements.txt, alembic/ + alembic.ini. Everything
+# else below is local-only or secret and must never be baked into an image.
+
+# --- Secrets and local configuration --------------------------------------
+# Runtime configuration is injected by the deployment (compose `env_file`, secrets).
+.env
+.env.*
+**/*adminsdk*.json
+**/service-account*.json
+**/*.pem
+**/*.key
+
+# --- Local Python environments and caches ---------------------------------
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# --- Tests and coverage ----------------------------------------------------
+tests
+pytest.ini
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+
+# --- Locally generated runtime data -----------------------------------------
+# The app logs to stdout; create_app()/lifespan recreate static/uploads/evidence.
+logs
+**/*.log
+static/uploads
+
+# --- VCS, editor and OS files ---------------------------------------------
+.git
+.gitignore
+.dockerignore
+.idea
+.vscode
+**/*.swp
+**/*.tmp
+**/.DS_Store

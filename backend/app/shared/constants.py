@@ -1,0 +1,3 @@
+# Shared application constants
+MAX_PAGINATION_LIMIT = 100
+DEFAULT_PAGINATION_LIMIT = 20
