@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Text, Float, DateTime, ForeignKey
+from sqlalchemy import String, Text, Float, DateTime, ForeignKey, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from geoalchemy2 import Geometry
 from app.models.base import Base
@@ -15,6 +15,11 @@ class Incident(Base):
     Statuses: reported, in_progress, resolved, cancelled
     """
     __tablename__ = "incidents"
+    __table_args__ = (
+        # Serves ST_DWithin(location::geography, ...) in GET /incidents/nearby (migration
+        # 2026_09_24_0001). The plain geometry GiST index on `location` comes from GeoAlchemy2.
+        Index("idx_incidents_location_geography", text("(location::geography)"), postgresql_using="gist"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)

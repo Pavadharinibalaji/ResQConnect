@@ -1,10 +1,12 @@
 import uuid
 import os
 import logging
-from typing import Optional, List
+from collections import defaultdict
+from typing import Optional, List, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select, func, inspect as sa_inspect
+from geoalchemy2 import Geography
+from sqlalchemy import select, func, cast, inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -38,7 +40,6 @@ from app.utils.evidence import (
     normalize_evidence_type,
     validate_evidence_content,
 )
-from app.utils.geo import haversine_distance
 
 logger = logging.getLogger("resqconnect.api.incidents")
 router = APIRouter(prefix="/incidents", tags=["Emergency Incidents & Responders"])
@@ -51,6 +52,10 @@ EVIDENCE_RESPONSE_HEADERS = {
     "Cache-Control": "private, no-store",
     "Content-Security-Policy": "default-src 'none'; sandbox",
 }
+
+# Plain `geography` (no typmod), so CAST(location AS geography) matches the
+# idx_incidents_location_geography expression index on (location::geography).
+GEOGRAPHY = Geography(geometry_type=None)
 
 def _is_admin(user: User) -> bool:
     # Single admin definition (app.core.roles), shared with RoleChecker and the admin API.
@@ -86,46 +91,71 @@ def _evidence_payload(evidence: IncidentEvidence) -> dict:
     data["file_url"] = _evidence_api_url(evidence.incident_id, evidence.id)
     return data
 
+async def build_incident_response_dicts(
+    db: AsyncSession,
+    incidents: Sequence[Incident],
+    current_user: Optional[User] = None
+) -> List[dict]:
+    """
+    Serializes incidents with their responder/evidence fields using a fixed number of
+    queries (one grouped query per related field for the whole batch), not per incident.
+    """
+    if not incidents:
+        return []
+    incident_ids = [incident.id for incident in incidents]
+
+    # Active responder counts
+    count_stmt = (
+        select(IncidentResponder.incident_id, func.count())
+        .where(
+            IncidentResponder.incident_id.in_(incident_ids),
+            IncidentResponder.status != "withdrawn"
+        )
+        .group_by(IncidentResponder.incident_id)
+    )
+    responder_counts = dict((await db.execute(count_stmt)).all())
+
+    # Current user's responder status (at most one row per incident: uq_incident_responder)
+    user_statuses = {}
+    if current_user:
+        user_resp_stmt = select(IncidentResponder.incident_id, IncidentResponder.status).where(
+            IncidentResponder.incident_id.in_(incident_ids),
+            IncidentResponder.user_id == current_user.id
+        )
+        user_statuses = dict((await db.execute(user_resp_stmt)).all())
+
+    # Attached evidence
+    ev_stmt = (
+        select(IncidentEvidence)
+        .where(IncidentEvidence.incident_id.in_(incident_ids))
+        .order_by(IncidentEvidence.created_at.asc(), IncidentEvidence.id.asc())
+    )
+    evidence_by_incident = defaultdict(list)
+    for evidence in (await db.execute(ev_stmt)).scalars():
+        evidence_by_incident[evidence.incident_id].append(_evidence_payload(evidence))
+
+    results = []
+    for incident in incidents:
+        # Validate from column values only. Passing the ORM object would make Pydantic
+        # read the lazy `responders` relationship (an implicit async lazy load, which
+        # raises MissingGreenlet); relationship-derived fields are filled in here/by callers.
+        column_values = {
+            attr.key: getattr(incident, attr.key)
+            for attr in sa_inspect(incident).mapper.column_attrs
+        }
+        data = IncidentResponse.model_validate(column_values).model_dump()
+        data["responder_count"] = responder_counts.get(incident.id, 0)
+        data["user_responder_status"] = user_statuses.get(incident.id)
+        data["evidence"] = evidence_by_incident.get(incident.id, [])
+        results.append(data)
+    return results
+
 async def build_incident_response_dict(
     db: AsyncSession,
     incident: Incident,
     current_user: Optional[User] = None
 ) -> dict:
-    # Validate from column values only. Passing the ORM object would make Pydantic
-    # read the lazy `responders` relationship (an implicit async lazy load, which
-    # raises MissingGreenlet); relationship-derived fields are filled in below/by callers.
-    column_values = {
-        attr.key: getattr(incident, attr.key)
-        for attr in sa_inspect(incident).mapper.column_attrs
-    }
-    data = IncidentResponse.model_validate(column_values).model_dump()
-
-    # Query active responder count
-    count_stmt = select(func.count()).where(
-        IncidentResponder.incident_id == incident.id,
-        IncidentResponder.status != "withdrawn"
-    )
-    count_res = await db.execute(count_stmt)
-    data["responder_count"] = count_res.scalar() or 0
-
-    # Query current user's responder status if authenticated
-    if current_user:
-        user_resp_stmt = select(IncidentResponder.status).where(
-            IncidentResponder.incident_id == incident.id,
-            IncidentResponder.user_id == current_user.id
-        )
-        user_resp_res = await db.execute(user_resp_stmt)
-        data["user_responder_status"] = user_resp_res.scalar_one_or_none()
-    else:
-        data["user_responder_status"] = None
-
-    # Query attached evidence
-    ev_stmt = select(IncidentEvidence).where(IncidentEvidence.incident_id == incident.id).order_by(IncidentEvidence.created_at.asc())
-    ev_res = await db.execute(ev_stmt)
-    evidence_list = ev_res.scalars().all()
-    data["evidence"] = [_evidence_payload(e) for e in evidence_list]
-
-    return data
+    return (await build_incident_response_dicts(db, [incident], current_user))[0]
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_incident(
@@ -222,31 +252,44 @@ async def get_nearby_incidents(
 ):
     """
     Returns emergency incidents ordered by distance from given GPS coordinates within radius_km.
+
+    Filtering, distance, ordering and pagination all run in PostGIS on WGS84 geography
+    distance (metres). The radius is inclusive and compared against the exact distance;
+    distance_km is rounded to 2 decimals for display only. Incidents without a stored
+    location are never returned.
     """
-    query = select(Incident)
+    location_geog = cast(Incident.location, GEOGRAPHY)
+    query_point = cast(func.ST_SetSRID(func.ST_MakePoint(longitude, latitude), 4326), GEOGRAPHY)
+    distance_km = (func.ST_Distance(location_geog, query_point) / 1000.0).label("distance_km")
 
+    conditions = [
+        Incident.location.is_not(None),
+        # Uses idx_incidents_location_geography.
+        func.ST_DWithin(location_geog, query_point, radius_km * 1000.0),
+    ]
     if category:
-        query = query.where(Incident.category == category.lower())
+        conditions.append(Incident.category == category.lower())
     if status_filter:
-        query = query.where(Incident.status == status_filter.lower())
+        conditions.append(Incident.status == status_filter.lower())
     if severity:
-        query = query.where(Incident.severity == severity.lower())
+        conditions.append(Incident.severity == severity.lower())
 
-    result = await db.execute(query)
-    all_incidents = result.scalars().all()
+    # Separate COUNT (not COUNT(*) OVER ()) so total stays correct when offset is past the last row.
+    count_stmt = select(func.count()).select_from(Incident).where(*conditions)
+    total = (await db.execute(count_stmt)).scalar_one()
 
-    nearby_list = []
-    for inc in all_incidents:
-        dist = haversine_distance(latitude, longitude, inc.latitude, inc.longitude)
-        if dist <= radius_km:
-            resp_dict = await build_incident_response_dict(db, inc, current_user)
-            resp_dict["distance_km"] = dist
-            nearby_list.append((dist, resp_dict))
+    page_stmt = (
+        select(Incident, distance_km)
+        .where(*conditions)
+        .order_by(distance_km.asc(), Incident.id.asc())
+        .offset(offset)
+        .limit(limit)
+    )
+    rows = (await db.execute(page_stmt)).all()
 
-    nearby_list.sort(key=lambda x: x[0])
-
-    total = len(nearby_list)
-    paginated = [item[1] for item in nearby_list[offset : offset + limit]]
+    paginated = await build_incident_response_dicts(db, [row[0] for row in rows], current_user)
+    for data, row in zip(paginated, rows):
+        data["distance_km"] = round(row[1], 2)
 
     return success_response(
         data={
